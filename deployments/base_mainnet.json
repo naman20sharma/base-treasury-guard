@@ -1,0 +1,8 @@
+{
+  "network": "base-mainnet",
+  "chainId": 8453,
+  "treasuryGuard": "0xa7C570d2AD90f6c9Af1f45e6f8462A672115A052",
+  "deployer": "0xe3FB6D487BBa291533b992BD3447b2D71fD7F309",
+  "txHash": "0xc256792f3830d364cabe7ecb86674e170fc1e9c701a30f97953e345a195fa25a",
+  "blockNumber": 41439784
+}
