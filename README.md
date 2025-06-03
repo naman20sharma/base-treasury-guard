@@ -72,6 +72,11 @@ Metrics are served at `HTTP_LISTEN_ADDR` (default `127.0.0.1:9000`) on `/metrics
 - **Delay and execution**: Requests can only execute after `minDelay` has passed and approvals meet threshold.
 - **Batch execution and gas floor**: The daemon groups ready requests and calls `executeBatch`, stopping early if gas remaining drops below `gasFloor`.
 
+## Base mainnet deployment
+- Contract address: 0xa7C570d2AD90f6c9Af1f45e6f8462A672115A052
+- BaseScan contract: https://basescan.org/address/0xa7C570d2AD90f6c9Af1f45e6f8462A672115A052
+- BaseScan transaction: https://basescan.org/tx/0xc256792f3830d364cabe7ecb86674e170fc1e9c701a30f97953e345a195fa25a
+
 ## Interview notes
 - Role separation makes the control plane explicit: treasurer proposes, guardian approves, executor executes.
 - Off‑chain policy is flexible and auditable without weakening on‑chain safety.
