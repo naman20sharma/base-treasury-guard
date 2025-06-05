@@ -1,0 +1,7 @@
+.env
+out/
+cache/
+broadcast/
+.DS_Store
+.idea/
+.vscode/
