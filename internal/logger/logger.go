@@ -1,23 +1,21 @@
 package logger
 
-import (
-    "go.uber.org/zap"
-)
+import "go.uber.org/zap"
 
 type Logger interface {
     Info(msg string, fields ...any)
     Error(msg string, fields ...any)
 }
 
-type zapSugar struct {
+type zapLogger struct {
     *zap.SugaredLogger
 }
 
-func (l zapSugar) Info(msg string, fields ...any) {
+func (l zapLogger) Info(msg string, fields ...any) {
     l.SugaredLogger.Infow(msg, fields...)
 }
 
-func (l zapSugar) Error(msg string, fields ...any) {
+func (l zapLogger) Error(msg string, fields ...any) {
     l.SugaredLogger.Errorw(msg, fields...)
 }
 
@@ -29,5 +27,5 @@ func New(level string) Logger {
         }
     }
     log, _ := cfg.Build()
-    return zapSugar{log.Sugar()}
+    return zapLogger{log.Sugar()}
 }
