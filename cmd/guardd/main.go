@@ -16,6 +16,8 @@ func main() {
     cfg := config.Load()
     log := logger.New(cfg.LogLevel)
 
+    log.Info("starting guardd")
+
     if missing := config.MissingRequired(cfg); len(missing) > 0 {
         log.Error("missing required env vars", "vars", missing)
         os.Exit(1)
