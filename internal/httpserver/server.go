@@ -18,16 +18,19 @@ type Server struct {
     srv  *http.Server
 }
 
-func New(addr string, log Logger) *Server {
+func New(addr string, log Logger, metricsHandler http.Handler) *Server {
     mux := http.NewServeMux()
     mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
         w.WriteHeader(http.StatusOK)
         _, _ = w.Write([]byte("ok"))
     })
-    mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-        w.WriteHeader(http.StatusOK)
-        _, _ = w.Write([]byte("metrics"))
-    })
+    if metricsHandler == nil {
+        metricsHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            w.WriteHeader(http.StatusOK)
+            _, _ = w.Write([]byte("metrics"))
+        })
+    }
+    mux.Handle("/metrics", metricsHandler)
 
     return &Server{
         addr: addr,
