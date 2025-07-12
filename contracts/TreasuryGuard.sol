@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {AccessControl} from "openzeppelin-contracts/contracts/access/AccessControl.sol";
 import {Pausable} from "openzeppelin-contracts/contracts/utils/Pausable.sol";
-import {ReentrancyGuard} from "openzeppelin-contracts/contracts/security/ReentrancyGuard.sol";
+import {ReentrancyGuard} from "openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 
