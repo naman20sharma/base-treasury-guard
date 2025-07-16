@@ -7,7 +7,7 @@ import "../contracts/TreasuryGuard.sol";
 contract DeployTreasuryGuard is Script {
     function run() external {
         vm.startBroadcast();
-        new TreasuryGuard();
+        new TreasuryGuard(address(this), 0, 0);
         vm.stopBroadcast();
     }
 }
