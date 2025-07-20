@@ -1,67 +1,53 @@
 package httpserver
 
 import (
-    "context"
-    "net"
-    "net/http"
-    "time"
+	"context"
+	"net/http"
+	"os"
+
+	"go.uber.org/zap"
 )
 
-type Logger interface {
-    Info(msg string, fields ...any)
-    Error(msg string, fields ...any)
-}
-
 type Server struct {
-    addr string
-    log  Logger
-    srv  *http.Server
+	httpServer *http.Server
 }
 
-func New(addr string, log Logger, metricsHandler http.Handler) *Server {
-    mux := http.NewServeMux()
-    mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-        w.WriteHeader(http.StatusOK)
-        _, _ = w.Write([]byte("ok"))
-    })
-    if metricsHandler == nil {
-        metricsHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            w.WriteHeader(http.StatusOK)
-            _, _ = w.Write([]byte("metrics"))
-        })
-    }
-    mux.Handle("/metrics", metricsHandler)
+func Start(addr string, metricsHandler http.Handler, log *zap.Logger) *Server {
+	if addr == "" {
+		addr = "127.0.0.1:9000"
+	}
+	if log == nil {
+		log = zap.NewNop()
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.Handle("/metrics", metricsHandler)
 
-    return &Server{
-        addr: addr,
-        log:  log,
-        srv:  &http.Server{Addr: addr, Handler: mux},
-    }
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("http server failed", zap.Error(err), zap.String("addr", addr))
+			os.Exit(1)
+		}
+	}()
+
+	return &Server{httpServer: srv}
 }
 
-func (s *Server) Start(ctx context.Context) error {
-    ln, err := net.Listen("tcp", s.addr)
-    if err != nil {
-        return err
-    }
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.httpServer.Shutdown(ctx)
+}
 
-    s.log.Info("http server listening", "addr", ln.Addr().String())
-    errCh := make(chan error, 1)
-
-    go func() {
-        errCh <- s.srv.Serve(ln)
-    }()
-
-    select {
-    case <-ctx.Done():
-        shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-        defer cancel()
-        _ = s.srv.Shutdown(shutdownCtx)
-        return nil
-    case err := <-errCh:
-        if err == http.ErrServerClosed {
-            return nil
-        }
-        return err
-    }
+func (s *Server) Addr() string {
+	if s.httpServer == nil {
+		return ""
+	}
+	return s.httpServer.Addr
 }

@@ -1,49 +1,114 @@
 package client
 
 import (
-    "math/big"
-    "strings"
+	"fmt"
+	"math/big"
 
-    "github.com/ethereum/go-ethereum/accounts/abi"
-    "github.com/ethereum/go-ethereum/common"
-    "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/common"
 )
 
-type TreasuryGuardClient struct {
-    address common.Address
-    abi     abi.ABI
+type RequestState struct {
+	ID              uint64
+	Token           common.Address
+	To              common.Address
+	Amount          *big.Int
+	CreatedBy       common.Address
+	Approvals       uint64
+	ApprovalsNeeded uint64
+	CreatedAt       uint64
+	EarliestExec    uint64
+	ExpiresAt       uint64
+	Status          uint8
 }
 
-func NewTreasuryGuardClient(address common.Address) (*TreasuryGuardClient, error) {
-    parsed, err := abi.JSON(strings.NewReader(TreasuryGuardABI))
-    if err != nil {
-        return nil, err
-    }
-    return &TreasuryGuardClient{address: address, abi: parsed}, nil
+func unpackRequest(values []interface{}) (RequestState, error) {
+	if len(values) != 11 {
+		return RequestState{}, fmt.Errorf("unexpected request fields")
+	}
+
+	id, ok := values[0].(*big.Int)
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid id type")
+	}
+	token, ok := values[1].(common.Address)
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid token type")
+	}
+	to, ok := values[2].(common.Address)
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid to type")
+	}
+	amount, ok := values[3].(*big.Int)
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid amount type")
+	}
+	createdBy, ok := values[4].(common.Address)
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid createdBy type")
+	}
+	approvals, ok := values[5].(*big.Int)
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid approvals type")
+	}
+	approvalsNeeded, ok := values[6].(*big.Int)
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid approvalsNeeded type")
+	}
+	createdAt, ok := asUint64(values[7])
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid createdAt type")
+	}
+	earliestExec, ok := asUint64(values[8])
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid earliestExec type")
+	}
+	expiresAt, ok := asUint64(values[9])
+	if !ok {
+		return RequestState{}, fmt.Errorf("invalid expiresAt type")
+	}
+	status, ok := values[10].(uint8)
+	if !ok {
+		if statusBig, ok := values[10].(*big.Int); ok {
+			status = uint8(statusBig.Uint64())
+		} else {
+			return RequestState{}, fmt.Errorf("invalid status type")
+		}
+	}
+
+	return RequestState{
+		ID:              id.Uint64(),
+		Token:           token,
+		To:              to,
+		Amount:          amount,
+		CreatedBy:       createdBy,
+		Approvals:       approvals.Uint64(),
+		ApprovalsNeeded: approvalsNeeded.Uint64(),
+		CreatedAt:       createdAt,
+		EarliestExec:    earliestExec,
+		ExpiresAt:       expiresAt,
+		Status:          status,
+	}, nil
 }
 
-func (c *TreasuryGuardClient) Address() common.Address {
-    return c.address
-}
-
-func (c *TreasuryGuardClient) EventID(name string) common.Hash {
-    return c.abi.Events[name].ID
-}
-
-func (c *TreasuryGuardClient) ParseRequestCreated(log types.Log) (*RequestCreatedEvent, error) {
-    var event RequestCreatedEvent
-    if err := c.abi.UnpackIntoInterface(&event, "RequestCreated", log.Data); err != nil {
-        return nil, err
-    }
-    if len(log.Topics) > 1 {
-        event.ID = new(big.Int).SetBytes(log.Topics[1].Bytes())
-    }
-    if len(log.Topics) > 2 {
-        event.Token = common.BytesToAddress(log.Topics[2].Bytes())
-    }
-    if len(log.Topics) > 3 {
-        event.To = common.BytesToAddress(log.Topics[3].Bytes())
-    }
-    event.Raw = log
-    return &event, nil
+func asUint64(v any) (uint64, bool) {
+	switch t := v.(type) {
+	case uint64:
+		return t, true
+	case uint32:
+		return uint64(t), true
+	case uint:
+		return uint64(t), true
+	case int64:
+		if t < 0 {
+			return 0, false
+		}
+		return uint64(t), true
+	case *big.Int:
+		if t == nil || t.Sign() < 0 || t.BitLen() > 64 {
+			return 0, false
+		}
+		return t.Uint64(), true
+	default:
+		return 0, false
+	}
 }

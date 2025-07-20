@@ -1,197 +1,307 @@
 package client
 
 import (
-    "context"
-    "crypto/ecdsa"
-    "math/big"
-    "strings"
-    "time"
+	"context"
+	"crypto/ecdsa"
+	"fmt"
+	"math/big"
+	"strings"
+	"sync"
 
-    "github.com/ethereum/go-ethereum"
-    "github.com/ethereum/go-ethereum/accounts/abi"
-    "github.com/ethereum/go-ethereum/common"
-    "github.com/ethereum/go-ethereum/core/types"
-    "github.com/ethereum/go-ethereum/crypto"
-    "github.com/ethereum/go-ethereum/ethclient"
+	"base-treasury-guard/internal/config"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"go.uber.org/zap"
 )
 
-type Logger interface {
-    Info(msg string, fields ...any)
-    Error(msg string, fields ...any)
-}
-
 type EthClient struct {
-    rpc   *ethclient.Client
-    ws    *ethclient.Client
-    log   Logger
-    guard *TreasuryGuardClient
+	rpc         *ethclient.Client
+	ws          *ethclient.Client
+	wsURL       string
+	contract    common.Address
+	abi         abi.ABI
+	log         *zap.Logger
+	guardianKey string
+	executorKey string
+	chainID     *big.Int
+	mu          sync.Mutex
 }
 
-type nopLogger struct{}
+func New(cfg config.Config, log *zap.Logger) (*EthClient, error) {
+	if log == nil {
+		log = zap.NewNop()
+	}
+	if !common.IsHexAddress(cfg.ContractAddress) {
+		return nil, fmt.Errorf("invalid contract address")
+	}
 
-func (nopLogger) Info(string, ...any)  {}
-func (nopLogger) Error(string, ...any) {}
+	rpc, err := ethclient.Dial(cfg.RPCUrl)
+	if err != nil {
+		return nil, err
+	}
 
-func NewEthClient(rpcURL, wsURL string, log Logger) (*EthClient, error) {
-    if log == nil {
-        log = nopLogger{}
-    }
-    rpc, err := ethclient.Dial(rpcURL)
-    if err != nil {
-        log.Error("failed to connect to rpc", "err", err)
-        return nil, err
-    }
-    ws, err := ethclient.Dial(wsURL)
-    if err != nil {
-        log.Error("failed to connect to ws", "err", err)
-        return nil, err
-    }
-    return &EthClient{rpc: rpc, ws: ws, log: log}, nil
+	parsed, err := ParseTreasuryGuardABI()
+	if err != nil {
+		rpc.Close()
+		return nil, err
+	}
+
+	chainID := new(big.Int).SetUint64(cfg.ChainID)
+
+	client := &EthClient{
+		rpc:         rpc,
+		wsURL:       cfg.WSUrl,
+		contract:    common.HexToAddress(cfg.ContractAddress),
+		abi:         parsed,
+		log:         log,
+		guardianKey: cfg.GuardianKey,
+		executorKey: cfg.ExecutorKey,
+		chainID:     chainID,
+	}
+
+	if err := client.dialWS(); err != nil {
+		rpc.Close()
+		return nil, err
+	}
+
+	return client, nil
 }
 
 func (c *EthClient) Close() {
-    if c.rpc != nil {
-        c.rpc.Close()
-    }
-    if c.ws != nil {
-        c.ws.Close()
-    }
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.ws != nil {
+		c.ws.Close()
+		c.ws = nil
+	}
+	if c.rpc != nil {
+		c.rpc.Close()
+		c.rpc = nil
+	}
 }
 
-func (c *EthClient) SubscribeRequestCreated(ctx context.Context, contract common.Address, sink chan<- *RequestCreatedEvent) error {
-    guard, err := NewTreasuryGuardClient(contract)
-    if err != nil {
-        return err
-    }
-    c.guard = guard
-
-    for {
-        if err := c.subscribeOnce(ctx, guard, contract, sink); err != nil {
-            if ctx.Err() != nil {
-                return ctx.Err()
-            }
-            c.log.Error("subscription error", "err", err)
-            time.Sleep(2 * time.Second)
-            continue
-        }
-        return nil
-    }
+func (c *EthClient) CheckChainID(ctx context.Context, expected uint64) (uint64, error) {
+	id, err := c.rpc.ChainID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if id.Uint64() != expected {
+		return id.Uint64(), fmt.Errorf("chain id mismatch: got %d expected %d", id.Uint64(), expected)
+	}
+	return id.Uint64(), nil
 }
 
-func (c *EthClient) subscribeOnce(ctx context.Context, guard *TreasuryGuardClient, contract common.Address, sink chan<- *RequestCreatedEvent) error {
-    logsCh := make(chan types.Log)
-    query := ethereum.FilterQuery{
-        Addresses: []common.Address{contract},
-        Topics:    [][]common.Hash{{guard.EventID("RequestCreated")}},
-    }
-
-    sub, err := c.ws.SubscribeFilterLogs(ctx, query, logsCh)
-    if err != nil {
-        return err
-    }
-
-    for {
-        select {
-        case <-ctx.Done():
-            sub.Unsubscribe()
-            return ctx.Err()
-        case err := <-sub.Err():
-            return err
-        case log := <-logsCh:
-            event, err := guard.ParseRequestCreated(log)
-            if err != nil {
-                c.log.Error("failed to parse RequestCreated", "err", err)
-                continue
-            }
-            select {
-            case sink <- event:
-            default:
-                c.log.Error("event channel full", "event", "RequestCreated")
-            }
-        }
-    }
+func (c *EthClient) ChainTime(ctx context.Context) (uint64, error) {
+	header, err := c.rpc.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	return header.Time, nil
 }
 
-func (c *EthClient) ApproveRequest(ctx context.Context, contract common.Address, chainID *big.Int, guardianKey string, id *big.Int) (common.Hash, error) {
-    data, err := encodeApproveRequest(id)
-    if err != nil {
-        return common.Hash{}, err
-    }
-    return c.sendTx(ctx, contract, chainID, guardianKey, data)
+func (c *EthClient) Approve(ctx context.Context, id uint64) (common.Hash, error) {
+	data, err := c.abi.Pack("approve", new(big.Int).SetUint64(id))
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return c.sendTx(ctx, c.guardianKey, data, 120000)
 }
 
-func (c *EthClient) ExecuteBatch(ctx context.Context, contract common.Address, chainID *big.Int, executorKey string, ids []*big.Int) (common.Hash, error) {
-    data, err := encodeExecuteBatch(ids)
-    if err != nil {
-        return common.Hash{}, err
-    }
-    return c.sendTx(ctx, contract, chainID, executorKey, data)
+func (c *EthClient) ExecuteBatch(ctx context.Context, ids []uint64, gasFloor uint64) (common.Hash, error) {
+	packedIDs := make([]*big.Int, 0, len(ids))
+	for _, id := range ids {
+		packedIDs = append(packedIDs, new(big.Int).SetUint64(id))
+	}
+	data, err := c.abi.Pack("executeBatch", packedIDs, new(big.Int).SetUint64(gasFloor))
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return c.sendTx(ctx, c.executorKey, data, 800000)
 }
 
-func (c *EthClient) sendTx(ctx context.Context, contract common.Address, chainID *big.Int, rawKey string, data []byte) (common.Hash, error) {
-    key, err := parseKey(rawKey)
-    if err != nil {
-        return common.Hash{}, err
-    }
-    from := crypto.PubkeyToAddress(key.PublicKey)
+func (c *EthClient) GetRequest(ctx context.Context, id uint64) (RequestState, error) {
+	data, err := c.abi.Pack("requests", new(big.Int).SetUint64(id))
+	if err != nil {
+		return RequestState{}, err
+	}
 
-    nonce, err := c.rpc.PendingNonceAt(ctx, from)
-    if err != nil {
-        return common.Hash{}, err
-    }
-    gasPrice, err := c.rpc.SuggestGasPrice(ctx)
-    if err != nil {
-        return common.Hash{}, err
-    }
+	msg := ethereum.CallMsg{To: &c.contract, Data: data}
+	res, err := c.rpc.CallContract(ctx, msg, nil)
+	if err != nil {
+		return RequestState{}, err
+	}
 
-    msg := ethereum.CallMsg{From: from, To: &contract, Data: data}
-    gasLimit, err := c.rpc.EstimateGas(ctx, msg)
-    if err != nil {
-        return common.Hash{}, err
-    }
+	decoded, err := c.abi.Unpack("requests", res)
+	if err != nil {
+		return RequestState{}, err
+	}
+	if len(decoded) != 11 {
+		return RequestState{}, fmt.Errorf("unexpected request fields")
+	}
 
-    tx := types.NewTransaction(nonce, contract, big.NewInt(0), gasLimit, gasPrice, data)
-    signer := types.LatestSignerForChainID(chainID)
-    signed, err := types.SignTx(tx, signer, key)
-    if err != nil {
-        return common.Hash{}, err
-    }
-
-    if err := c.rpc.SendTransaction(ctx, signed); err != nil {
-        return common.Hash{}, err
-    }
-    return signed.Hash(), nil
+	return unpackRequest(decoded)
 }
 
-func parseKey(raw string) (*ecdsa.PrivateKey, error) {
-    trimmed := strings.TrimPrefix(raw, "0x")
-    return crypto.HexToECDSA(trimmed)
+func (c *EthClient) sendTx(ctx context.Context, keyHex string, data []byte, gasLimit uint64) (common.Hash, error) {
+	keyHex = strings.TrimPrefix(keyHex, "0x")
+	priv, err := crypto.HexToECDSA(keyHex)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	from := crypto.PubkeyToAddress(priv.PublicKey)
+
+	nonce, err := c.rpc.PendingNonceAt(ctx, from)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	tryDynamic := true
+	var tipCap *big.Int
+	if tip, err := c.rpc.SuggestGasTipCap(ctx); err == nil {
+		tipCap = tip
+	} else {
+		tryDynamic = false
+	}
+
+	if tryDynamic {
+		feeCap := new(big.Int)
+		if price, err := c.rpc.SuggestGasPrice(ctx); err == nil {
+			feeCap.Set(price)
+		} else {
+			feeCap.Set(tipCap)
+			feeCap.Mul(feeCap, big.NewInt(2))
+		}
+		if feeCap.Cmp(tipCap) < 0 {
+			feeCap.Set(tipCap)
+			feeCap.Mul(feeCap, big.NewInt(2))
+		}
+
+		tx := types.NewTx(&types.DynamicFeeTx{
+			ChainID:   c.chainID,
+			Nonce:     nonce,
+			To:        &c.contract,
+			Gas:       gasLimit,
+			GasTipCap: tipCap,
+			GasFeeCap: feeCap,
+			Value:     big.NewInt(0),
+			Data:      data,
+		})
+
+		signed, err := types.SignTx(tx, types.LatestSignerForChainID(c.chainID), priv)
+		if err == nil {
+			err = c.rpc.SendTransaction(ctx, signed)
+		}
+		if err == nil {
+			return signed.Hash(), nil
+		}
+		if isNonceTooLow(err) {
+			return c.retryWithNonce(ctx, priv, gasLimit, data, true)
+		}
+		return common.Hash{}, err
+	}
+
+	return c.sendLegacy(ctx, priv, nonce, gasLimit, data)
 }
 
-func encodeApproveRequest(id *big.Int) ([]byte, error) {
-    methodID := crypto.Keccak256([]byte("approveRequest(uint256)"))[:4]
-    args := abi.Arguments{{Type: mustType("uint256")}}
-    packed, err := args.Pack(id)
-    if err != nil {
-        return nil, err
-    }
-    return append(methodID, packed...), nil
+func (c *EthClient) retryWithNonce(ctx context.Context, priv *ecdsa.PrivateKey, gasLimit uint64, data []byte, dynamic bool) (common.Hash, error) {
+	from := crypto.PubkeyToAddress(priv.PublicKey)
+	nonce, err := c.rpc.PendingNonceAt(ctx, from)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if dynamic {
+		return c.sendDynamic(ctx, priv, nonce, gasLimit, data)
+	}
+	return c.sendLegacy(ctx, priv, nonce, gasLimit, data)
 }
 
-func encodeExecuteBatch(ids []*big.Int) ([]byte, error) {
-    methodID := crypto.Keccak256([]byte("executeBatch(uint256[])"))[:4]
-    args := abi.Arguments{{Type: mustType("uint256[]")}}
-    packed, err := args.Pack(ids)
-    if err != nil {
-        return nil, err
-    }
-    return append(methodID, packed...), nil
+func (c *EthClient) sendDynamic(ctx context.Context, priv *ecdsa.PrivateKey, nonce uint64, gasLimit uint64, data []byte) (common.Hash, error) {
+	tipCap, err := c.rpc.SuggestGasTipCap(ctx)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	feeCap := new(big.Int)
+	if price, err := c.rpc.SuggestGasPrice(ctx); err == nil {
+		feeCap.Set(price)
+	} else {
+		feeCap.Set(tipCap)
+		feeCap.Mul(feeCap, big.NewInt(2))
+	}
+	if feeCap.Cmp(tipCap) < 0 {
+		feeCap.Set(tipCap)
+		feeCap.Mul(feeCap, big.NewInt(2))
+	}
+
+	tx := types.NewTx(&types.DynamicFeeTx{
+		ChainID:   c.chainID,
+		Nonce:     nonce,
+		To:        &c.contract,
+		Gas:       gasLimit,
+		GasTipCap: tipCap,
+		GasFeeCap: feeCap,
+		Value:     big.NewInt(0),
+		Data:      data,
+	})
+
+	signed, err := types.SignTx(tx, types.LatestSignerForChainID(c.chainID), priv)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if err := c.rpc.SendTransaction(ctx, signed); err != nil {
+		return common.Hash{}, err
+	}
+	return signed.Hash(), nil
 }
 
-func mustType(name string) abi.Type {
-    typ, err := abi.NewType(name, "", nil)
-    if err != nil {
-        panic(err)
-    }
-    return typ
+func (c *EthClient) sendLegacy(ctx context.Context, priv *ecdsa.PrivateKey, nonce uint64, gasLimit uint64, data []byte) (common.Hash, error) {
+	price, err := c.rpc.SuggestGasPrice(ctx)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	tx := types.NewTx(&types.LegacyTx{
+		Nonce:    nonce,
+		To:       &c.contract,
+		Gas:      gasLimit,
+		GasPrice: price,
+		Value:    big.NewInt(0),
+		Data:     data,
+	})
+
+	signed, err := types.SignTx(tx, types.LatestSignerForChainID(c.chainID), priv)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if err := c.rpc.SendTransaction(ctx, signed); err != nil {
+		if isNonceTooLow(err) {
+			return c.retryWithNonce(ctx, priv, gasLimit, data, false)
+		}
+		return common.Hash{}, err
+	}
+	return signed.Hash(), nil
+}
+
+func isNonceTooLow(err error) bool {
+	return strings.Contains(strings.ToLower(err.Error()), "nonce too low")
+}
+
+func (c *EthClient) dialWS() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ws != nil {
+		c.ws.Close()
+		c.ws = nil
+	}
+	ws, err := ethclient.Dial(c.wsURL)
+	if err != nil {
+		return err
+	}
+	c.ws = ws
+	return nil
 }

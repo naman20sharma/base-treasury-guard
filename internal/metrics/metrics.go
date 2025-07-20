@@ -1,66 +1,69 @@
 package metrics
 
 import (
-    "net/http"
+	"net/http"
 
-    "github.com/prometheus/client_golang/prometheus"
-    "github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-type Metrics struct {
-    Approvals  prometheus.Counter
-    Executions prometheus.Counter
-    Failures   prometheus.Counter
-    registry   *prometheus.Registry
+type Registry struct {
+	registry        *prometheus.Registry
+	approvalsTotal  prometheus.Counter
+	executionsTotal prometheus.Counter
+	failuresTotal   prometheus.Counter
 }
 
-func New(namespace string) *Metrics {
-    reg := prometheus.NewRegistry()
+func NewRegistry(namespace string) *Registry {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(prometheus.NewGoCollector())
+	reg.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	approvals := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "approvals_total",
+		Help:      "Total approvals sent",
+	})
+	executions := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "executions_total",
+		Help:      "Total executeBatch calls sent",
+	})
+	failures := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "failures_total",
+		Help:      "Total transaction failures",
+	})
 
-    approvals := prometheus.NewCounter(prometheus.CounterOpts{
-        Namespace: namespace,
-        Name:      "approvals_total",
-        Help:      "Total approvals submitted by the daemon.",
-    })
-    executions := prometheus.NewCounter(prometheus.CounterOpts{
-        Namespace: namespace,
-        Name:      "executions_total",
-        Help:      "Total executions submitted by the daemon.",
-    })
-    failures := prometheus.NewCounter(prometheus.CounterOpts{
-        Namespace: namespace,
-        Name:      "failures_total",
-        Help:      "Total failed operations in the daemon.",
-    })
+	reg.MustRegister(approvals, executions, failures)
 
-    reg.MustRegister(approvals, executions, failures)
-
-    return &Metrics{
-        Approvals:  approvals,
-        Executions: executions,
-        Failures:   failures,
-        registry:   reg,
-    }
+	return &Registry{
+		registry:        reg,
+		approvalsTotal:  approvals,
+		executionsTotal: executions,
+		failuresTotal:   failures,
+	}
 }
 
-func (m *Metrics) Handler() http.Handler {
-    return promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{})
+func (r *Registry) Handler() http.Handler {
+	return promhttp.HandlerFor(r.registry, promhttp.HandlerOpts{})
 }
 
-func (m *Metrics) IncApprovals() {
-    if m != nil {
-        m.Approvals.Inc()
-    }
+func (r *Registry) IncApprovals() {
+	r.approvalsTotal.Inc()
 }
 
-func (m *Metrics) IncExecutions() {
-    if m != nil {
-        m.Executions.Inc()
-    }
+func (r *Registry) IncExecutions() {
+	r.executionsTotal.Inc()
 }
 
-func (m *Metrics) IncFailures() {
-    if m != nil {
-        m.Failures.Inc()
-    }
+func (r *Registry) IncFailures() {
+	r.failuresTotal.Inc()
+}
+
+func register(reg *prometheus.Registry, collector prometheus.Collector) {
+	if err := reg.Register(collector); err != nil {
+		if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			return
+		}
+	}
 }

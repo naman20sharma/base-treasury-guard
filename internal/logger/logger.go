@@ -1,31 +1,23 @@
 package logger
 
-import "go.uber.org/zap"
+import (
+	"strings"
 
-type Logger interface {
-    Info(msg string, fields ...any)
-    Error(msg string, fields ...any)
-}
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
 
-type zapLogger struct {
-    *zap.SugaredLogger
-}
-
-func (l zapLogger) Info(msg string, fields ...any) {
-    l.SugaredLogger.Infow(msg, fields...)
-}
-
-func (l zapLogger) Error(msg string, fields ...any) {
-    l.SugaredLogger.Errorw(msg, fields...)
-}
-
-func New(level string) Logger {
-    cfg := zap.NewProductionConfig()
-    if level != "" {
-        if err := cfg.Level.UnmarshalText([]byte(level)); err != nil {
-            cfg.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-        }
-    }
-    log, _ := cfg.Build()
-    return zapLogger{log.Sugar()}
+func New(level string) *zap.Logger {
+	cfg := zap.NewProductionConfig()
+	lvl := strings.ToLower(strings.TrimSpace(level))
+	if lvl == "" {
+		cfg.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	} else if err := cfg.Level.UnmarshalText([]byte(lvl)); err != nil {
+		cfg.Level = zap.NewAtomicLevelAt(zapcore.InfoLevel)
+	}
+	log, err := cfg.Build()
+	if err != nil {
+		return zap.NewNop()
+	}
+	return log
 }

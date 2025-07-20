@@ -1,42 +1,51 @@
 package main
 
 import (
-    "context"
-    "os"
-    "os/signal"
-    "syscall"
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-    "base-treasury-guard/internal/config"
-    "base-treasury-guard/internal/httpserver"
-    "base-treasury-guard/internal/logger"
-    "base-treasury-guard/internal/metrics"
-    "base-treasury-guard/internal/watcher"
+	"base-treasury-guard/internal/config"
+	"base-treasury-guard/internal/httpserver"
+	"base-treasury-guard/internal/logger"
+	"base-treasury-guard/internal/metrics"
+	"base-treasury-guard/internal/watcher"
+
+	"go.uber.org/zap"
 )
 
 func main() {
-    cfg := config.Load()
-    log := logger.New(cfg.LogLevel)
-    metrics := metrics.New(cfg.MetricsNamespace)
+	cfg := config.Load()
+	log := logger.New(cfg.LogLevel)
 
-    if missing := config.MissingRequired(cfg); len(missing) > 0 {
-        log.Error("missing required env vars", "vars", missing)
-        os.Exit(1)
-    }
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-    ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-    defer cancel()
+	reg := metrics.NewRegistry(cfg.MetricsNamespace)
+	server := httpserver.Start(cfg.HTTPListenAddr, reg.Handler(), log)
+	log.Info("http server listening", zap.String("addr", server.Addr()))
 
-    srv := httpserver.New(cfg.HTTPListenAddr, log, metrics.Handler())
-    go func() {
-        if err := srv.Start(ctx); err != nil {
-            log.Error("http server exited", "err", err)
-            cancel()
-        }
-    }()
+	w := watcher.New(cfg, log, reg)
+	watcherErr := make(chan error, 1)
+	go func() {
+		watcherErr <- w.Run(ctx)
+	}()
 
-    w := watcher.New(cfg, log, metrics)
-    if err := w.Run(ctx); err != nil {
-        log.Error("watcher exited", "err", err)
-        os.Exit(1)
-    }
+	select {
+	case <-ctx.Done():
+	case err := <-watcherErr:
+		if err != nil {
+			log.Error("watcher exited", zap.Error(err))
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Error("http server shutdown failed", zap.Error(err))
+	} else {
+		log.Info("http server stopped")
+	}
 }
